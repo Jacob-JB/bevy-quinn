@@ -4,14 +4,13 @@ use std::sync::Arc;
 use bevy::prelude::*;
 use bevy_quinn::*;
 use quinn_proto::crypto::rustls::QuicClientConfig;
-use rustls::crypto::CryptoProvider;
 
 fn main() {
     let mut app = App::new();
 
     app.add_plugins(MinimalPlugins);
     app.add_plugins(bevy::log::LogPlugin {
-        level: bevy::log::Level::TRACE,
+        level: bevy::log::Level::INFO,
         ..default()
     });
 
@@ -26,7 +25,11 @@ fn spawn_endpoint(
     mut commands: Commands,
 ) {
 
-    let mut endpoint = Endpoint::new("0.0.0.0:0".parse().unwrap(), None).unwrap();
+    let mut endpoint = Endpoint::new(EndpointConfig {
+        bind_addr: "0.0.0.0:0".parse().unwrap(),
+        server_config: None,
+        receive_budget: 10_000,
+    }).unwrap();
 
     let mut cfg = rustls_platform_verifier::tls_config_with_provider(Arc::new(rustls::crypto::ring::default_provider())).unwrap();
     cfg.alpn_protocols = vec![b"h3".to_vec()];
@@ -39,4 +42,3 @@ fn spawn_endpoint(
 
     commands.spawn(endpoint);
 }
-

@@ -9,7 +9,7 @@ fn main() {
 
     app.add_plugins(MinimalPlugins);
     app.add_plugins(bevy::log::LogPlugin {
-        level: bevy::log::Level::TRACE,
+        level: bevy::log::Level::INFO,
         ..default()
     });
 
@@ -19,7 +19,6 @@ fn main() {
 
     app.run();
 }
-
 
 fn load_certs() -> rustls::ServerConfig {
     let chain = std::fs::File::open("fullchain.pem").expect("failed to open cert file");
@@ -64,7 +63,11 @@ fn spawn_endpoint(
 
     let server_config = bevy_quinn::quinn_proto::ServerConfig::with_crypto(Arc::new(config));
 
-    let endpoint = Endpoint::new("0.0.0.0:27510".parse().unwrap(), Some(server_config)).unwrap();
+    let endpoint = Endpoint::new(EndpointConfig {
+        bind_addr: "0.0.0.0:27510".parse().unwrap(),
+        server_config: Some(server_config),
+        receive_budget: 10,
+    }).unwrap();
 
     commands.spawn(endpoint);
 }

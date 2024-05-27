@@ -1,5 +1,5 @@
 
-use std::{io::IoSliceMut, net::{SocketAddr, UdpSocket}, sync::Arc, time::Instant};
+use std::{collections::VecDeque, io::IoSliceMut, net::{SocketAddr, UdpSocket}, sync::Arc, time::Instant};
 
 use bevy::{prelude::*, utils::{HashMap, HashSet}};
 use quinn_udp::{RecvMeta, UdpSockRef, UdpSocketState};
@@ -10,6 +10,8 @@ pub use quinn_proto;
 pub struct QuinnPlugin;
 impl Plugin for QuinnPlugin {
     fn build(&self, app: &mut App) {
+        app.add_event::<Connected>();
+
         app.add_systems(PreUpdate, update_endpoints);
     }
 }
@@ -17,6 +19,7 @@ impl Plugin for QuinnPlugin {
 
 #[derive(Component)]
 pub struct Endpoint {
+    config: EndpointConfig,
     socket: UdpSocket,
     socket_state: UdpSocketState,
     /// allocated memory for receiving udp datagrams
@@ -29,12 +32,28 @@ pub struct Endpoint {
     connections: HashMap<quinn_proto::ConnectionHandle, ConnectionState>,
 }
 
+pub struct EndpointConfig {
+    pub bind_addr: SocketAddr,
+    pub server_config: Option<quinn_proto::ServerConfig>,
+    pub receive_budget: usize,
+}
+
+enum EndpointCallback {
+    SuccessfulConnection(quinn_proto::ConnectionHandle),
+    OpenedStream {
+        stream_id: quinn_proto::StreamId,
+        bi_directional: bool,
+    },
+    ClosedStream(quinn_proto::StreamId),
+    FinishedStream(quinn_proto::StreamId),
+}
+
 impl Endpoint {
-    pub fn new(addr: SocketAddr, server_config: Option<quinn_proto::ServerConfig>) -> std::io::Result<Self> {
+    pub fn new(config: EndpointConfig) -> std::io::Result<Self> {
 
         let endpoint_config = quinn_proto::EndpointConfig::default();
 
-        let socket = UdpSocket::bind(addr)?;
+        let socket = UdpSocket::bind(config.bind_addr)?;
         let socket_state = UdpSocketState::new(UdpSockRef::from(&socket))?;
 
         let receive_buffer = vec![
@@ -47,12 +66,13 @@ impl Endpoint {
         let endpoint = quinn_proto::Endpoint::new(
             Arc::new(endpoint_config),
             // the default server config to use for connections
-            server_config.map(Arc::new),
+            config.server_config.clone().map(Arc::new),
             !socket_state.may_fragment(),
             None
         );
 
         Ok(Endpoint {
+            config,
             socket,
             socket_state,
             receive_buffer,
@@ -62,7 +82,7 @@ impl Endpoint {
         })
     }
 
-    fn udpate(&mut self, now: Instant) {
+    fn udpate(&mut self, now: Instant, mut callback: impl FnMut(EndpointCallback)) {
         // construct an array of size `quinn_udp::BATCH_SIZE` from the allocated receive buffer
         let mut buffers = self.receive_buffer.chunks_mut(self.receive_buffer.len() / quinn_udp::BATCH_SIZE).map(IoSliceMut::new);
         let mut buffers: [IoSliceMut; quinn_udp::BATCH_SIZE] = std::array::from_fn(|_| buffers.next().unwrap());
@@ -123,7 +143,7 @@ impl Endpoint {
                                             warn!("failed to accept incoming connection {:?}", err.cause);
                                         },
                                         Ok((handle, connection)) => {
-                                            let connection = ConnectionState::new(handle, connection);
+                                            let connection = ConnectionState::new(handle, connection, &self.config);
                                             if let Some(_) = self.connections.insert(handle, connection) {
                                                 panic!("got the same connection handle twice");
                                             }
@@ -150,6 +170,20 @@ impl Endpoint {
                 &mut self.endpoint,
                 &self.socket,
                 &mut self.socket_state,
+                |client_callback| match client_callback {
+                    ClientCallback::SuccessfulConnection(connection_handle) => {
+                        callback(EndpointCallback::SuccessfulConnection(connection_handle));
+                    },
+                    ClientCallback::OpenedStream { stream_id, bi_directional } => {
+                        callback(EndpointCallback::OpenedStream { stream_id, bi_directional });
+                    },
+                    ClientCallback::ClosedStream(stream_id) => {
+                        callback(EndpointCallback::ClosedStream(stream_id));
+                    },
+                    ClientCallback::FinishedStream(stream_id) => {
+                        callback(EndpointCallback::FinishedStream(stream_id));
+                    },
+                },
             );
         }
     }
@@ -157,7 +191,7 @@ impl Endpoint {
     pub fn connect(&mut self, client_config: quinn_proto::ClientConfig, addr: SocketAddr, server_name: &str) -> Result<(), quinn_proto::ConnectError> {
         let (handle, connection) = self.endpoint.connect(Instant::now(), client_config, addr, server_name)?;
 
-        let connection = ConnectionState::new(handle, connection);
+        let connection = ConnectionState::new(handle, connection, &self.config);
         if let Some(_) = self.connections.insert(handle, connection) {
             panic!("got the same connection handle twice");
         }
@@ -166,7 +200,6 @@ impl Endpoint {
     }
 }
 
-
 struct ConnectionState {
     connection: quinn_proto::Connection,
     handle: quinn_proto::ConnectionHandle,
@@ -174,22 +207,40 @@ struct ConnectionState {
     send_buffer: Vec<u8>,
     /// a set of streams that have data ready to be read
     readable_streams: HashSet<quinn_proto::StreamId>,
-    send_streams: HashSet<quinn_proto::StreamId>,
+    send_streams: HashMap<quinn_proto::StreamId, SendStreamState>,
+    receive_budget: usize,
+    read_data: HashMap<quinn_proto::StreamId, VecDeque<u8>>,
+}
+
+enum ClientCallback {
+    SuccessfulConnection(quinn_proto::ConnectionHandle),
+    OpenedStream {
+        stream_id: quinn_proto::StreamId,
+        bi_directional: bool,
+    },
+    ClosedStream(quinn_proto::StreamId),
+    FinishedStream(quinn_proto::StreamId),
 }
 
 impl ConnectionState {
-    fn new(handle: quinn_proto::ConnectionHandle, connection: quinn_proto::Connection) -> Self {
+    fn new(handle: quinn_proto::ConnectionHandle, connection: quinn_proto::Connection, config: &EndpointConfig) -> Self {
         ConnectionState {
             connection,
             handle,
             connected: false,
             send_buffer: Vec::new(),
             readable_streams: HashSet::new(),
-            send_streams: HashSet::new(),
+            send_streams: HashMap::new(),
+            receive_budget: config.receive_budget,
+            read_data: HashMap::new(),
         }
     }
 
-    fn update(&mut self, now: Instant, endpoint: &mut quinn_proto::Endpoint, socket: &UdpSocket, socket_state: &mut quinn_udp::UdpSocketState) {
+    fn get_statistics(&self) -> quinn_proto::ConnectionStats {
+        self.connection.stats()
+    }
+
+    fn update(&mut self, now: Instant, endpoint: &mut quinn_proto::Endpoint, socket: &UdpSocket, socket_state: &mut quinn_udp::UdpSocketState, mut callback: impl FnMut(ClientCallback)) {
         // perform polls as described on `quinn_proto::Connection`
 
         // poll transmits
@@ -227,7 +278,7 @@ impl ConnectionState {
             }
 
             if end_connection {
-                // drop connection state
+                todo!("drop connection state");
             }
         }
 
@@ -235,19 +286,25 @@ impl ConnectionState {
             match event {
                 quinn_proto::Event::Connected => {
                     self.connected = true;
-                    trace!("Connected successfully!");
+                    debug!("Connected successfully to {}", self.connection.remote_address());
+
+                    callback(ClientCallback::SuccessfulConnection(self.handle));
+
+                    let stream_id = self.open_uni();
+                    self.get_send_stream_mut(stream_id).unwrap().write(&vec![69; 100]);
                 },
                 quinn_proto::Event::ConnectionLost { reason } => {
-                    trace!("Connection lost with reason: {:?}", reason);
+                    debug!("Connection lost with reason: {:?}", reason);
                 },
                 quinn_proto::Event::HandshakeDataReady => {
-                    trace!("Handshake ready for connection!");
+                    debug!("Handshake ready for connection!");
                 },
                 quinn_proto::Event::Stream(stream_event) => match stream_event {
                     quinn_proto::StreamEvent::Opened { dir } => {
-                        trace!("Opened new stream on connection!");
+                        debug!("Opened new stream on connection!");
                     },
                     quinn_proto::StreamEvent::Readable { id } => {
+                        debug!("stream {} has readable data", id);
                         self.readable_streams.insert(id);
                     },
                     quinn_proto::StreamEvent::Writable { id } => {
@@ -260,16 +317,15 @@ impl ConnectionState {
 
                     },
                     quinn_proto::StreamEvent::Available { dir } => {
-                        trace!("Stream is now available!");
+                        debug!("stream is now available!");
                     },
                 },
                 quinn_proto::Event::DatagramReceived => {
-                    trace!("Datagram has been received!");
+
                 },
                 quinn_proto::Event::DatagramsUnblocked => {
-                    trace!("Datagram is now unblocked.");
-                },
 
+                },
             }
         }
 
@@ -277,13 +333,15 @@ impl ConnectionState {
         // accept new streams
         while let Some(stream_id) = self.connection.streams().accept(quinn_proto::Dir::Uni) {
             // new uni directional stream
+            info!("peer opened unidirectional stream {}", stream_id);
             self.readable_streams.insert(stream_id);
         }
 
         while let Some(stream_id) = self.connection.streams().accept(quinn_proto::Dir::Bi) {
             // new bi directional stream
+            info!("peer opened bidirectional stream {}", stream_id);
             self.readable_streams.insert(stream_id);
-            self.send_streams.insert(stream_id);
+            self.send_streams.insert(stream_id, SendStreamState::default());
         }
 
 
@@ -298,7 +356,11 @@ impl ConnectionState {
             };
 
             loop {
-                match chunks.next(usize::MAX) {
+                if self.receive_budget == 0 {
+                    break;
+                }
+
+                match chunks.next(self.receive_budget) {
                     Ok(None) | Err(quinn_proto::ReadError::Blocked) => {
                         // no more data is ready to be read
                         break;
@@ -308,6 +370,11 @@ impl ConnectionState {
                     },
                     Ok(Some(chunk)) => {
                         let data = chunk.bytes.as_ref();
+                        self.receive_budget = self.receive_budget.checked_sub(data.len()).expect("should not receive more than the receive budget");
+
+                        info!("received {} bytes", data.len());
+
+                        self.read_data.entry(stream_id).or_insert_with(VecDeque::default).extend(data);
                     }
                 }
             }
@@ -315,18 +382,97 @@ impl ConnectionState {
             // no need to promt, will be done anyway
             let _ = chunks.finalize();
         }
+
+
+        // write to streams
+        for (&stream_id, stream_state) in self.send_streams.iter_mut() {
+            loop {
+                if stream_state.send_queue.is_empty() {
+                    break;
+                }
+
+                let (slice_a, slice_b) = stream_state.send_queue.as_slices();
+                let slice = if slice_a.is_empty() {slice_b} else {slice_a};
+
+                match self.connection.send_stream(stream_id).write(slice) {
+                    Ok(bytes) => {
+                        stream_state.send_queue.drain(..bytes);
+                    },
+                    Err(quinn_proto::WriteError::Blocked) => break,
+                    Err(quinn_proto::WriteError::ClosedStream) => panic!("Wrote to a closed stream"),
+                    Err(quinn_proto::WriteError::Stopped(reason)) => panic!("Wrote to a stopped stream ({})", reason),
+                }
+            }
+        }
     }
+
+    fn open_uni(&mut self) -> quinn_proto::StreamId {
+        let stream_id = self.connection.streams().open(quinn_proto::Dir::Uni).expect("Ran out of streams");
+        self.send_streams.insert(stream_id, SendStreamState::default());
+        stream_id
+    }
+
+    fn open_bi(&mut self) -> quinn_proto::StreamId {
+        let stream_id = self.connection.streams().open(quinn_proto::Dir::Bi).expect("Ran out of streams");
+        self.send_streams.insert(stream_id, SendStreamState::default());
+        stream_id
+    }
+
+    fn get_send_stream_mut(&mut self, stream_id: quinn_proto::StreamId) -> Option<&mut SendStreamState> {
+        self.send_streams.get_mut(&stream_id)
+    }
+}
+
+#[derive(Default)]
+struct SendStreamState {
+    send_queue: VecDeque<u8>,
+}
+
+impl SendStreamState {
+    fn write(&mut self, data: &[u8]) {
+        self.send_queue.extend(data);
+    }
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash, Ord, PartialOrd)]
+pub struct Connection(quinn_proto::ConnectionHandle);
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub struct Stream(quinn_proto::StreamId);
+
+
+#[derive(Event)]
+pub struct Connected {
+    pub endpoint_entity: Entity,
+    pub connection: Connection,
 }
 
 
 
 fn update_endpoints(
-    mut endpoint_q: Query<&mut Endpoint>,
+    mut endpoint_q: Query<(Entity, &mut Endpoint)>,
+    mut connected_w: EventWriter<Connected>,
 ) {
     let now = Instant::now();
 
-    for mut endpoint in endpoint_q.iter_mut() {
-        endpoint.udpate(now);
+    for (endpoint_entity, mut endpoint) in endpoint_q.iter_mut() {
+        endpoint.udpate(now, |callback| match callback {
+            EndpointCallback::SuccessfulConnection(connection_handle) => {
+                connected_w.send(Connected {
+                    endpoint_entity,
+                    connection: Connection(connection_handle),
+                });
+            },
+            EndpointCallback::OpenedStream { stream_id, bi_directional } => {
+
+            },
+            EndpointCallback::ClosedStream(stream_id) => {
+
+            },
+            EndpointCallback::FinishedStream(stream_id) => {
+
+            },
+        });
     }
 }
 
