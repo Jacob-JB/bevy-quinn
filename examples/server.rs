@@ -23,19 +23,13 @@ fn main() {
 fn spawn_endpoint(
     mut commands: Commands,
 ) {
-    generate_self_signed_cert();
 
-    let cert_chain = todo!();
-    let key = todo!();
 
-    let mut server_crypto = bevy_quinn::rustls::server::ServerConfig::builder()
-        .with_no_client_auth()
-        .with_single_cert(cert_chain, key)
-        .unwrap();
+    let a: QuicServerConfig;
 
-    let mut server_config = bevy_quinn::quinn_proto::ServerConfig::with_single_cert(cert_chain, key);
+    let mut server_config = bevy_quinn::quinn_proto::ServerConfig::with_crypto(server_crypto);
 
-    let endpoint = Endpoint::new("0.0.0.0:27510".parse().unwrap(), ).unwrap();
+    let endpoint = Endpoint::new("0.0.0.0:27510".parse().unwrap(), Some(server_config)).unwrap();
 
     commands.spawn(endpoint);
 }

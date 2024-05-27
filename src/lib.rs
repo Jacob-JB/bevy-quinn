@@ -5,7 +5,6 @@ use bevy::{prelude::*, utils::{HashMap, HashSet}};
 use quinn_udp::{RecvMeta, UdpSockRef, UdpSocketState};
 
 pub use quinn_proto;
-pub use rustls;
 
 
 pub struct QuinnPlugin;
@@ -48,8 +47,8 @@ impl Endpoint {
         let endpoint = quinn_proto::Endpoint::new(
             Arc::new(endpoint_config),
             // the default server config to use for connections
-            server_config,
-            false,
+            server_config.map(Arc::new),
+            !socket_state.may_fragment(),
             None
         );
 
@@ -141,6 +140,15 @@ impl Endpoint {
                     }
                 }
             }
+
+            for connection in self.connections.values_mut() {
+                connection.update(
+                    now,
+                    &mut self.endpoint,
+                    &self.socket,
+                    &mut self.socket_state,
+                );
+            }
         }
     }
 
@@ -179,11 +187,11 @@ impl ConnectionState {
         }
     }
 
-    fn update(&mut self, now: Instant, endpoint: &mut Endpoint) {
+    fn update(&mut self, now: Instant, endpoint: &mut quinn_proto::Endpoint, socket: &UdpSocket, socket_state: &mut quinn_udp::UdpSocketState) {
         // perform polls as described on `quinn_proto::Connection`
 
         // poll transmits
-        let max_datagrams = endpoint.socket_state.max_gso_segments();
+        let max_datagrams = socket_state.max_gso_segments();
 
         loop {
             self.send_buffer.clear();
@@ -193,7 +201,7 @@ impl ConnectionState {
                 break;
             };
 
-            if let Err(err) = endpoint.socket_state.send(UdpSockRef::from(&endpoint.socket), &udp_transmit(&transmit, &self.send_buffer)) {
+            if let Err(err) = socket_state.send(UdpSockRef::from(&socket), &udp_transmit(&transmit, &self.send_buffer)) {
                 panic!("{:?}", err);
             }
         }
@@ -210,7 +218,7 @@ impl ConnectionState {
             // this is the last event the connection will emit, the connection state can be freed
             let end_connection = endpoint_event.is_drained();
 
-            if let Some(connection_event) = endpoint.endpoint.handle_event(self.handle, endpoint_event) {
+            if let Some(connection_event) = endpoint.handle_event(self.handle, endpoint_event) {
                 self.connection.handle_event(connection_event);
             }
 
@@ -229,6 +237,7 @@ impl ConnectionState {
 
                 },
                 quinn_proto::Event::HandshakeDataReady => {
+
                 },
                 quinn_proto::Event::Stream(stream_event) => match stream_event {
                     quinn_proto::StreamEvent::Opened { dir } => {},

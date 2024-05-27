@@ -21,7 +21,19 @@ fn main() {
 fn spawn_endpoint(
     mut commands: Commands,
 ) {
-    let mut endpoint = Endpoint::new("0.0.0.0:0".parse().unwrap()).unwrap();
+    let mut endpoint = Endpoint::new("0.0.0.0:0".parse().unwrap(), None).unwrap();
+
+    let chain = File::open("keys/cert.pem").expect("failed to open cert file");
+    let mut chain = std::io::BufReader::new(chain);
+
+    let chain: Vec<rustls::pki_types::CertificateDer> = rustls_pemfile::certs(&mut chain)
+        .collect::<Result<_, _>>()
+        .unwrap();
+
+    let mut root_cert_store = rustls::RootCertStore::empty();
+    for cert in chain {
+        root_cert_store.add(&cert)?;
+    }
 
     let client_config = quinn_proto::ClientConfig::with_root_certificates(todo!()).unwrap();
 
@@ -29,3 +41,4 @@ fn spawn_endpoint(
 
     commands.spawn(endpoint);
 }
+
