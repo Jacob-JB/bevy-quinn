@@ -44,17 +44,20 @@ pub struct OpenedReceiveStream {
     pub stream: StreamId,
 }
 
-/// a receive stream was closed by another endpoint
+/// a receive stream was finished or reset by another endpoint
 ///
 /// this does not mean that the data has been entirely read,
 /// just that no more data will be received.
 ///
 /// [FinishedReceiveStream] will be fired once all the data has been read
+///
+/// if the stream was reset `error_code` will contain the error code
 #[derive(Event)]
 pub struct ClosedReceiveStream {
     pub endpoint_entity: Entity,
     pub connection: ConnectionId,
     pub stream: StreamId,
+    pub error_code: Option<quinn_proto::VarInt>,
 }
 
 /// a receive stream's data has been entirely read
@@ -115,11 +118,12 @@ fn update_endpoints(
                     stream: StreamId(stream_id),
                 });
             },
-            EndpointCallback::ClosedReceiveStream { connection_handle, stream_id } => {
+            EndpointCallback::ClosedReceiveStream { connection_handle, stream_id, error_code } => {
                 closed_receive_stream_w.send(ClosedReceiveStream {
                     endpoint_entity,
                     connection: ConnectionId(connection_handle),
                     stream: StreamId(stream_id),
+                    error_code,
                 });
             },
             EndpointCallback::FinishedReceiveStream { connection_handle, stream_id } => {

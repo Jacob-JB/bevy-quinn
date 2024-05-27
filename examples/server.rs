@@ -85,6 +85,6 @@ fn ping_connections(
         let stream_id = connection.open_uni().unwrap();
         let stream = connection.get_send_stream_mut(stream_id).unwrap();
         stream.write(b"Hello World!");
-        stream.close();
+        connection.reset_stream(stream_id, 69u64.try_into().unwrap()).unwrap();
     }
 }

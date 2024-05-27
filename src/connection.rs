@@ -37,10 +37,9 @@ pub(crate) enum ConnectionCallback {
 
     /// the peer opened a receive stream
     OpenedReceiveStream(quinn_proto::StreamId),
-    /// the peer closed a receive stream
-    ///
-    /// currently don't know when to call this, connection doesn't seem to fire an event when a receive stream is finished
-    ClosedReceiveStream(quinn_proto::StreamId),
+    /// the peer closed/reset a receive stream,
+    /// including an error code if the stream was reset
+    ClosedReceiveStream(quinn_proto::StreamId, Option<quinn_proto::VarInt>),
     /// a receive stream's data was entirely read
     FinishedReceiveStream(quinn_proto::StreamId),
 
@@ -108,6 +107,7 @@ impl Connection {
                     quinn_proto::StreamEvent::Opened { .. } => {
                     },
                     quinn_proto::StreamEvent::Readable { id } => {
+                        debug!("{} readable", id);
                         self.readable_streams.insert(id);
                     },
                     quinn_proto::StreamEvent::Writable { .. } => {
@@ -181,8 +181,8 @@ impl Connection {
             let mut stream = self.connection.recv_stream(stream_id);
 
             let mut chunks = match stream.read(true) {
-                Err(quinn_proto::ReadableError::ClosedStream) => continue,
-                Err(quinn_proto::ReadableError::IllegalOrderedRead) => unreachable!("should never read unordered"),
+                Err(quinn_proto::ReadableError::ClosedStream) => panic!("stream should exist"),
+                Err(quinn_proto::ReadableError::IllegalOrderedRead) => panic!("should never read unordered"),
                 Ok(chunks) => chunks,
             };
 
@@ -191,13 +191,24 @@ impl Connection {
                     break;
                 }
 
+                let stream = self.receive_streams.get_mut(&stream_id).expect("stream should exist");
+
                 match chunks.next(self.receive_budget) {
-                    Ok(None) | Err(quinn_proto::ReadError::Blocked) => {
-                        // no more data is ready to be read
+                    Ok(None) => {
+                        debug!("stream finished ({})", stream_id);
+                        stream.closed = true;
+                        callback(ConnectionCallback::ClosedReceiveStream(stream_id, None));
                         break;
                     },
-                    Err(quinn_proto::ReadError::Reset(_reason)) => {
-                        // stream was reset
+                    Err(quinn_proto::ReadError::Reset(reason)) => {
+                        debug!("stream reset ({}) {}", stream_id, reason);
+                        stream.closed = true;
+                        callback(ConnectionCallback::ClosedReceiveStream(stream_id, Some(reason)));
+                        break;
+                    },
+                    Err(quinn_proto::ReadError::Blocked) => {
+                        // no more data is ready to be read
+                        break;
                     },
                     Ok(Some(chunk)) => {
                         let data = chunk.bytes.as_ref();
@@ -205,7 +216,7 @@ impl Connection {
 
                         debug!("received {} bytes", data.len());
 
-                        self.receive_streams.get_mut(&stream_id).expect("stream should exist").buffer.extend(data);
+                        stream.buffer.extend(data);
                     }
                 }
             }
@@ -280,6 +291,18 @@ impl Connection {
     pub fn get_send_stream(&self, stream_id: StreamId) -> Option<&SendBuffer> {
         self.send_streams.get(&stream_id.0)
     }
+
+    /// resets a send stream, abandoning transmitting any unsent data
+    ///
+    /// fails if the stream has not been open or is finished and has been closed
+    pub fn reset_stream(&mut self, stream_id: StreamId, error_code: quinn_proto::VarInt) -> Result<(), ()> {
+        if let Ok(()) = self.connection.send_stream(stream_id.0).reset(error_code) {
+            self.send_streams.remove(&stream_id.0);
+            Ok(())
+        } else {
+            Err(())
+        }
+    }
 }
 
 impl SendBuffer {
@@ -305,7 +328,7 @@ impl SendBuffer {
     }
 
     /// closes the stream and prevents any more data from being written
-    pub fn close(&mut self) {
+    pub fn finish(&mut self) {
         self.closed = true
     }
 }

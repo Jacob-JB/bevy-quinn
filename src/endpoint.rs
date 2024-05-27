@@ -32,10 +32,12 @@ pub(crate) enum EndpointCallback {
         connection_handle: quinn_proto::ConnectionHandle,
         stream_id: quinn_proto::StreamId,
     },
-    /// another endpoint closed a receive stream
+    /// another endpoint finished/reset a receive stream,
+    /// includes the error code if the stream was reset
     ClosedReceiveStream {
         connection_handle: quinn_proto::ConnectionHandle,
         stream_id: quinn_proto::StreamId,
+        error_code: Option<quinn_proto::VarInt>,
     },
     /// a receive stream's data was entirely read
     FinishedReceiveStream {
@@ -186,7 +188,7 @@ impl Endpoint {
                         callback(EndpointCallback::SuccessfulConnection(connection_handle));
                     },
                     ConnectionCallback::OpenedReceiveStream(stream_id) => callback(EndpointCallback::OpenedReceiveStream { connection_handle, stream_id }),
-                    ConnectionCallback::ClosedReceiveStream(stream_id) => callback(EndpointCallback::ClosedReceiveStream { connection_handle, stream_id }),
+                    ConnectionCallback::ClosedReceiveStream(stream_id, error_code) => callback(EndpointCallback::ClosedReceiveStream { connection_handle, stream_id, error_code }),
                     ConnectionCallback::FinishedReceiveStream(stream_id) => callback(EndpointCallback::FinishedReceiveStream { connection_handle, stream_id }),
                     ConnectionCallback::OpenedSendStream(stream_id) => callback(EndpointCallback::OpenedSendStream { connection_handle, stream_id }),
                     ConnectionCallback::ClosedSendStream(stream_id, error_code) => callback(EndpointCallback::ClosedSendStream { connection_handle, stream_id, error_code }),
