@@ -1,13 +1,17 @@
 
+use std::sync::Arc;
+
 use bevy::prelude::*;
 use bevy_quinn::*;
+use quinn_proto::crypto::rustls::QuicClientConfig;
+use rustls::crypto::CryptoProvider;
 
 fn main() {
     let mut app = App::new();
 
     app.add_plugins(MinimalPlugins);
     app.add_plugins(bevy::log::LogPlugin {
-        level: bevy::log::Level::DEBUG,
+        level: bevy::log::Level::TRACE,
         ..default()
     });
 
@@ -21,23 +25,17 @@ fn main() {
 fn spawn_endpoint(
     mut commands: Commands,
 ) {
+
     let mut endpoint = Endpoint::new("0.0.0.0:0".parse().unwrap(), None).unwrap();
 
-    let chain = File::open("keys/cert.pem").expect("failed to open cert file");
-    let mut chain = std::io::BufReader::new(chain);
+    let mut cfg = rustls_platform_verifier::tls_config_with_provider(Arc::new(rustls::crypto::ring::default_provider())).unwrap();
+    cfg.alpn_protocols = vec![b"h3".to_vec()];
 
-    let chain: Vec<rustls::pki_types::CertificateDer> = rustls_pemfile::certs(&mut chain)
-        .collect::<Result<_, _>>()
-        .unwrap();
+    let quic_cfg: QuicClientConfig = cfg.try_into().unwrap();
+    let cfg = quinn_proto::ClientConfig::new(Arc::new(quic_cfg));
 
-    let mut root_cert_store = rustls::RootCertStore::empty();
-    for cert in chain {
-        root_cert_store.add(&cert)?;
-    }
 
-    let client_config = quinn_proto::ClientConfig::with_root_certificates(todo!()).unwrap();
-
-    endpoint.connect(client_config, "127.0.0.1:27510".parse().unwrap(), "localhost").unwrap();
+    endpoint.connect(cfg, "127.0.0.1:27510".parse().unwrap(), "dev.drewridley.com").unwrap();
 
     commands.spawn(endpoint);
 }

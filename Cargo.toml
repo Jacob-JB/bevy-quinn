@@ -7,6 +7,9 @@ edition = "2021"
 
 [dependencies]
 bevy = "0.13"
-quinn-proto = { version = "0.11" }
+quinn-proto = { version = "0.11", features = ["rustls", "platform-verifier"] }
 quinn-udp = "0.5"
 bytes = "1"
+rustls = "0.23.8"
+rustls-pemfile = "2.1.2"
+rustls-platform-verifier = "0.3.1"

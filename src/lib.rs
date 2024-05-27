@@ -79,24 +79,26 @@ impl Endpoint {
                 Ok(message_count) => {
                     // process the number of received messages
                     for (meta, buffer) in metas.iter().zip(buffers.iter()).take(message_count) {
-                        let mut data: bytes::BytesMut = buffer[0..meta.len].into();
+                        let mut remaining_data = &buffer[0..meta.len];
 
                         // `data` could contain many datagrams due to gro, process each individually
-                        while !data.is_empty() {
-                            let data = data.split_off(meta.stride.min(data.len()));
+                        while !remaining_data.is_empty() {
+                            let stride_length = meta.stride.min(remaining_data.len());
+                            let data = &remaining_data[0..stride_length];
+                            remaining_data = &remaining_data[stride_length..];
 
                             let ecn = meta.ecn.map(quinn_proto_ecn);
 
                             let mut response_buffer = Vec::new();
 
-                            debug!("processing datagram");
+                            debug!("processing {} bytes", remaining_data.len());
 
                             let Some(datagram_event) = self.endpoint.handle(
                                 now,
                                 meta.addr,
                                 meta.dst_ip,
                                 ecn,
-                                data,
+                                data.into(),
                                 &mut response_buffer,
                             ) else {
                                 continue;
@@ -140,15 +142,15 @@ impl Endpoint {
                     }
                 }
             }
+        }
 
-            for connection in self.connections.values_mut() {
-                connection.update(
-                    now,
-                    &mut self.endpoint,
-                    &self.socket,
-                    &mut self.socket_state,
-                );
-            }
+        for connection in self.connections.values_mut() {
+            connection.update(
+                now,
+                &mut self.endpoint,
+                &self.socket,
+                &mut self.socket_state,
+            );
         }
     }
 
@@ -201,6 +203,8 @@ impl ConnectionState {
                 break;
             };
 
+            debug!("Transmitting {} bytes to: {}", transmit.size, transmit.destination);
+
             if let Err(err) = socket_state.send(UdpSockRef::from(&socket), &udp_transmit(&transmit, &self.send_buffer)) {
                 panic!("{:?}", err);
             }
@@ -227,20 +231,22 @@ impl ConnectionState {
             }
         }
 
-
         while let Some(event) = self.connection.poll() {
             match event {
                 quinn_proto::Event::Connected => {
                     self.connected = true;
+                    trace!("Connected successfully!");
                 },
                 quinn_proto::Event::ConnectionLost { reason } => {
-
+                    trace!("Connection lost with reason: {:?}", reason);
                 },
                 quinn_proto::Event::HandshakeDataReady => {
-
+                    trace!("Handshake ready for connection!");
                 },
                 quinn_proto::Event::Stream(stream_event) => match stream_event {
-                    quinn_proto::StreamEvent::Opened { dir } => {},
+                    quinn_proto::StreamEvent::Opened { dir } => {
+                        trace!("Opened new stream on connection!");
+                    },
                     quinn_proto::StreamEvent::Readable { id } => {
                         self.readable_streams.insert(id);
                     },
@@ -253,13 +259,15 @@ impl ConnectionState {
                     quinn_proto::StreamEvent::Stopped { id, error_code } => {
 
                     },
-                    quinn_proto::StreamEvent::Available { dir } => {},
+                    quinn_proto::StreamEvent::Available { dir } => {
+                        trace!("Stream is now available!");
+                    },
                 },
                 quinn_proto::Event::DatagramReceived => {
-
+                    trace!("Datagram has been received!");
                 },
                 quinn_proto::Event::DatagramsUnblocked => {
-
+                    trace!("Datagram is now unblocked.");
                 },
 
             }
