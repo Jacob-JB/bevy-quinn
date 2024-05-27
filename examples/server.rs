@@ -1,5 +1,5 @@
 
-use std::{io::Read, path::Path, sync::Arc};
+use std::{io::Read, sync::Arc};
 
 use bevy::prelude::*;
 use bevy_quinn::*;
@@ -9,13 +9,14 @@ fn main() {
 
     app.add_plugins(MinimalPlugins);
     app.add_plugins(bevy::log::LogPlugin {
-        level: bevy::log::Level::INFO,
+        level: bevy::log::Level::DEBUG,
         ..default()
     });
 
     app.add_plugins(QuinnPlugin);
 
     app.add_systems(Startup, spawn_endpoint);
+    app.add_systems(Update, ping_connections);
 
     app.run();
 }
@@ -70,4 +71,20 @@ fn spawn_endpoint(
     }).unwrap();
 
     commands.spawn(endpoint);
+}
+
+fn ping_connections(
+    mut endpoint_q: Query<&mut Endpoint>,
+    mut connected_r: EventReader<Connected>,
+) {
+    for &Connected { endpoint_entity, connection } in connected_r.read() {
+        let mut endpoint = endpoint_q.get_mut(endpoint_entity).unwrap();
+
+        let connection = endpoint.connection_mut(connection).unwrap();
+
+        let stream_id = connection.open_uni().unwrap();
+        let stream = connection.get_send_stream_mut(stream_id).unwrap();
+        stream.write(b"Hello World!");
+        stream.close();
+    }
 }

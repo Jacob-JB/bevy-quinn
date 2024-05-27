@@ -10,7 +10,7 @@ fn main() {
 
     app.add_plugins(MinimalPlugins);
     app.add_plugins(bevy::log::LogPlugin {
-        level: bevy::log::Level::INFO,
+        level: bevy::log::Level::DEBUG,
         ..default()
     });
 
