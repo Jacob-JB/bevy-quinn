@@ -14,11 +14,26 @@ fn main() {
         ..default()
     });
 
-    app.add_plugins(QuinnPlugin);
+    app.add_plugins(QuinnPlugin::default());
 
     app.add_systems(Startup, spawn_endpoint);
+    app.add_systems(Update, (
+        (
+            spawn_streams,
+            remove_streams,
+        ),
+        apply_deferred,
+        read_data,
+    ).chain());
 
     app.run();
+}
+
+#[derive(Component)]
+struct Stream {
+    connection_id: ConnectionId,
+    stream_id: StreamId,
+    data: Vec<u8>,
 }
 
 fn spawn_endpoint(
@@ -41,4 +56,52 @@ fn spawn_endpoint(
     endpoint.connect(cfg, "127.0.0.1:27510".parse().unwrap(), "dev.drewridley.com").unwrap();
 
     commands.spawn(endpoint);
+}
+
+fn spawn_streams(
+    mut commands: Commands,
+    mut stream_r: EventReader<OpenedReceiveStream>,
+) {
+    for &OpenedReceiveStream { endpoint_entity, connection_id, stream_id } in stream_r.read() {
+        commands.spawn(Stream {
+            connection_id,
+            stream_id,
+            data: Vec::new(),
+        }).set_parent(endpoint_entity);
+    }
+}
+
+fn read_data(
+    mut stream_q: Query<(&mut Stream, &Parent)>,
+    mut endpoint_q: Query<&mut Endpoint>,
+) {
+    for (mut stream, stream_parent) in stream_q.iter_mut() {
+        let mut endpoint = endpoint_q.get_mut(stream_parent.get()).unwrap();
+        let connection = endpoint.connection_mut(stream.connection_id).unwrap();
+        let stream_buffer = connection.get_receive_stream_mut(stream.stream_id).unwrap();
+
+        stream.data.extend(stream_buffer.read().as_ref());
+    }
+}
+
+fn remove_streams(
+    mut commands: Commands,
+    mut stream_r: EventReader<FinishedReceiveStream>,
+    stream_q: Query<(Entity, &Stream, &Parent)>,
+) {
+    for &FinishedReceiveStream { endpoint_entity, connection_id, stream_id } in stream_r.read() {
+        for (stream_entity, stream, stream_parent) in stream_q.iter() {
+            if {
+                stream_parent.get() == endpoint_entity &&
+                stream.connection_id == connection_id &&
+                stream.stream_id == stream_id
+            } {
+                let message = std::str::from_utf8(stream.data.as_slice()).unwrap();
+                info!("stream finished \"{}\"", message);
+
+                commands.entity(stream_entity).despawn_recursive();
+                break;
+            }
+        }
+    }
 }

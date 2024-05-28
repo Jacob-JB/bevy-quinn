@@ -13,7 +13,7 @@ fn main() {
         ..default()
     });
 
-    app.add_plugins(QuinnPlugin);
+    app.add_plugins(QuinnPlugin::default());
 
     app.add_systems(Startup, spawn_endpoint);
     app.add_systems(Update, ping_connections);
@@ -77,14 +77,14 @@ fn ping_connections(
     mut endpoint_q: Query<&mut Endpoint>,
     mut connected_r: EventReader<Connected>,
 ) {
-    for &Connected { endpoint_entity, connection } in connected_r.read() {
+    for &Connected { endpoint_entity, connection_id } in connected_r.read() {
         let mut endpoint = endpoint_q.get_mut(endpoint_entity).unwrap();
 
-        let connection = endpoint.connection_mut(connection).unwrap();
+        let connection = endpoint.connection_mut(connection_id).unwrap();
 
         let stream_id = connection.open_uni().unwrap();
         let stream = connection.get_send_stream_mut(stream_id).unwrap();
-        stream.write(b"Hello World!");
-        connection.reset_stream(stream_id, 69u64.try_into().unwrap()).unwrap();
+        stream.write("Hello Client!".as_bytes());
+        stream.finish();
     }
 }

@@ -66,10 +66,6 @@ impl Connection {
         }
     }
 
-    pub fn get_statistics(&self) -> quinn_proto::ConnectionStats {
-        self.connection.stats()
-    }
-
     /// perform polls as described on `quinn_proto::Connection`
     pub(crate) fn update(&mut self, now: Instant, endpoint: &mut quinn_proto::Endpoint, socket: &UdpSocket, socket_state: &mut UdpSocketState, mut callback: impl FnMut(ConnectionCallback)) {
 
@@ -266,6 +262,16 @@ impl Connection {
         });
     }
 
+    /// gets connection statistics
+    pub fn get_statistics(&self) -> quinn_proto::ConnectionStats {
+        self.connection.stats()
+    }
+
+    /// get data negotiated during the handshake, if available
+    pub fn get_handshake_data(&self) -> Option<Box<dyn std::any::Any>> {
+        self.connection.crypto_session().handshake_data()
+    }
+
     /// opens a unidirectional stream and creates a [SendBuffer] with the returned [StreamId]
     ///
     /// returns `None` if streams are exhausted
@@ -284,12 +290,24 @@ impl Connection {
         Some(StreamId(stream_id))
     }
 
+    /// gets the send buffer for a stream
+    pub fn get_send_stream(&self, stream_id: StreamId) -> Option<&SendBuffer> {
+        self.send_streams.get(&stream_id.0)
+    }
+
+    /// gets the send buffer for a stream
     pub fn get_send_stream_mut(&mut self, stream_id: StreamId) -> Option<&mut SendBuffer> {
         self.send_streams.get_mut(&stream_id.0)
     }
 
-    pub fn get_send_stream(&self, stream_id: StreamId) -> Option<&SendBuffer> {
-        self.send_streams.get(&stream_id.0)
+    /// gets the receive buffer for a stream
+    pub fn get_receive_stream(&self, stream_id: StreamId) -> Option<&ReceiveBuffer> {
+        self.receive_streams.get(&stream_id.0)
+    }
+
+    /// gets the receive buffer for a stream
+    pub fn get_receive_stream_mut(&mut self, stream_id: StreamId) -> Option<&mut ReceiveBuffer> {
+        self.receive_streams.get_mut(&stream_id.0)
     }
 
     /// resets a send stream, abandoning transmitting any unsent data

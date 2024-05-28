@@ -1,7 +1,7 @@
 
 use std::time::Instant;
 
-use bevy::prelude::*;
+use bevy::{ecs::schedule::ScheduleLabel, prelude::*, utils::intern::Interned};
 pub use quinn_proto;
 
 
@@ -12,7 +12,24 @@ pub use endpoint::*;
 pub use connection::*;
 
 
-pub struct QuinnPlugin;
+pub struct QuinnPlugin {
+    update_schedule: Interned<dyn ScheduleLabel>,
+}
+
+impl QuinnPlugin {
+    pub fn new(update_schedule: impl ScheduleLabel) -> Self {
+        QuinnPlugin {
+            update_schedule: update_schedule.intern(),
+        }
+    }
+}
+
+impl Default for QuinnPlugin {
+    fn default() -> Self {
+        QuinnPlugin::new(PreUpdate)
+    }
+}
+
 impl Plugin for QuinnPlugin {
     fn build(&self, app: &mut App) {
         app.add_event::<Connected>();
@@ -22,7 +39,7 @@ impl Plugin for QuinnPlugin {
         app.add_event::<OpenedSendStream>();
         app.add_event::<ClosedSendStream>();
 
-        app.add_systems(PreUpdate, update_endpoints);
+        app.add_systems(self.update_schedule, update_endpoints);
     }
 }
 
@@ -31,7 +48,7 @@ impl Plugin for QuinnPlugin {
 #[derive(Event)]
 pub struct Connected {
     pub endpoint_entity: Entity,
-    pub connection: ConnectionId,
+    pub connection_id: ConnectionId,
 }
 
 /// a receive stream was opened by another endpoint
@@ -40,8 +57,8 @@ pub struct Connected {
 #[derive(Event)]
 pub struct OpenedReceiveStream {
     pub endpoint_entity: Entity,
-    pub connection: ConnectionId,
-    pub stream: StreamId,
+    pub connection_id: ConnectionId,
+    pub stream_id: StreamId,
 }
 
 /// a receive stream was finished or reset by another endpoint
@@ -55,8 +72,8 @@ pub struct OpenedReceiveStream {
 #[derive(Event)]
 pub struct ClosedReceiveStream {
     pub endpoint_entity: Entity,
-    pub connection: ConnectionId,
-    pub stream: StreamId,
+    pub connection_id: ConnectionId,
+    pub stream_id: StreamId,
     pub error_code: Option<quinn_proto::VarInt>,
 }
 
@@ -64,8 +81,8 @@ pub struct ClosedReceiveStream {
 #[derive(Event)]
 pub struct FinishedReceiveStream {
     pub endpoint_entity: Entity,
-    pub connection: ConnectionId,
-    pub stream: StreamId,
+    pub connection_id: ConnectionId,
+    pub stream_id: StreamId,
 }
 
 
@@ -75,18 +92,18 @@ pub struct FinishedReceiveStream {
 #[derive(Event)]
 pub struct OpenedSendStream {
     pub endpoint_entity: Entity,
-    pub connection: ConnectionId,
-    pub stream: StreamId,
+    pub connection_id: ConnectionId,
+    pub stream_id: StreamId,
 }
 
-/// a ssend tream was closed by another endpoint
+/// a send tream was closed by another endpoint
 ///
 /// this will not be fired for streams closed by this endpoint
 #[derive(Event)]
 pub struct ClosedSendStream {
     pub endpoint_entity: Entity,
-    pub connection: ConnectionId,
-    pub stream: StreamId,
+    pub connection_id: ConnectionId,
+    pub stream_id: StreamId,
     pub error_code: quinn_proto::VarInt,
 }
 
@@ -108,43 +125,43 @@ fn update_endpoints(
             EndpointCallback::SuccessfulConnection(connection_handle) => {
                 connected_w.send(Connected {
                     endpoint_entity,
-                    connection: ConnectionId(connection_handle),
+                    connection_id: ConnectionId(connection_handle),
                 });
             },
             EndpointCallback::OpenedReceiveStream { connection_handle, stream_id } => {
                 opened_receive_stream_w.send(OpenedReceiveStream {
                     endpoint_entity,
-                    connection: ConnectionId(connection_handle),
-                    stream: StreamId(stream_id),
+                    connection_id: ConnectionId(connection_handle),
+                    stream_id: StreamId(stream_id),
                 });
             },
             EndpointCallback::ClosedReceiveStream { connection_handle, stream_id, error_code } => {
                 closed_receive_stream_w.send(ClosedReceiveStream {
                     endpoint_entity,
-                    connection: ConnectionId(connection_handle),
-                    stream: StreamId(stream_id),
+                    connection_id: ConnectionId(connection_handle),
+                    stream_id: StreamId(stream_id),
                     error_code,
                 });
             },
             EndpointCallback::FinishedReceiveStream { connection_handle, stream_id } => {
                 finished_receive_stream_w.send(FinishedReceiveStream {
                     endpoint_entity,
-                    connection: ConnectionId(connection_handle),
-                    stream: StreamId(stream_id),
+                    connection_id: ConnectionId(connection_handle),
+                    stream_id: StreamId(stream_id),
                 });
             },
             EndpointCallback::OpenedSendStream { connection_handle, stream_id } => {
                 opened_send_stream_w.send(OpenedSendStream {
                     endpoint_entity,
-                    connection: ConnectionId(connection_handle),
-                    stream: StreamId(stream_id),
+                    connection_id: ConnectionId(connection_handle),
+                    stream_id: StreamId(stream_id),
                 });
             },
             EndpointCallback::ClosedSendStream { connection_handle, stream_id, error_code } => {
                 closed_send_stream_w.send(ClosedSendStream {
                     endpoint_entity,
-                    connection: ConnectionId(connection_handle),
-                    stream: StreamId(stream_id),
+                    connection_id: ConnectionId(connection_handle),
+                    stream_id: StreamId(stream_id),
                     error_code,
                 });
             },
