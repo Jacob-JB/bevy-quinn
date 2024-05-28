@@ -12,6 +12,11 @@ pub use endpoint::*;
 pub use connection::*;
 
 
+/// the system set where quinn state is updated and events are fired
+#[derive(Clone, PartialEq, Eq, Debug, Hash, SystemSet)]
+pub struct QuinnUpdate;
+
+
 pub struct QuinnPlugin {
     update_schedule: Interned<dyn ScheduleLabel>,
 }
@@ -39,7 +44,7 @@ impl Plugin for QuinnPlugin {
         app.add_event::<OpenedSendStream>();
         app.add_event::<ClosedSendStream>();
 
-        app.add_systems(self.update_schedule, update_endpoints);
+        app.add_systems(self.update_schedule, update_endpoints.in_set(QuinnUpdate));
     }
 }
 
